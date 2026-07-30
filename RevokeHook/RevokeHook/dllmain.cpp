@@ -17,6 +17,9 @@
 //用于计算MD5
 #pragma comment(lib, "crypt32.lib")
 
+//打印日志
+static HANDLE g_hLogFile = INVALID_HANDLE_VALUE;
+
 //VEH + INT3断点
 static void* g_bpDelMsg = nullptr;
 static void* g_bpAdd2DB = nullptr;
@@ -139,6 +142,14 @@ void OutputDebugPrintf(const char* strOutputString, ...)
     _vsnprintf_s(strBuffer, sizeof(strBuffer) - 1, strOutputString, vlArgs);  //_vsnprintf_s  _vsnprintf
     va_end(vlArgs);
     OutputDebugStringA(strBuffer);  //OutputDebugString    // OutputDebugStringW
+
+	// 同时写入到文件log中
+    if (g_hLogFile != INVALID_HANDLE_VALUE)
+    {
+        DWORD dwWritten = 0;
+		strBuffer[strlen(strBuffer)] = '\n';  // 添加换行符
+        WriteFile(g_hLogFile, strBuffer, (DWORD)strlen(strBuffer), &dwWritten, NULL);
+    }
 }
 
 /**
@@ -462,6 +473,8 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
     {
         uint8_t revoke_sig[] = { 0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e }; //'撤回'
         uint8_t self_revoke_sig[] = { 0xe4, 0xbd, 0xa0, 0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e }; //'你撤回'
+        uint8_t revoke_sig_english[] = { 0x72, 0x65, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x64 }; //'recalled'
+		uint8_t self_revoke_sig_english[] = { 0x59, 0x6f, 0x75, 0x20, 0x72, 0x65, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x64 }; //'You recalled'
 
         StdString* revoke_xml = nullptr;
 
@@ -474,6 +487,11 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
             {
                 revoke_xml = FindStdStringWithSig(candidates[c], 0x2000,
                     revoke_sig, sizeof(revoke_sig));
+                if (revoke_xml == nullptr)
+                {
+                    revoke_xml = FindStdStringWithSig(candidates[c], 0x2000,
+                        revoke_sig_english, sizeof(revoke_sig_english));
+                }
                 if (revoke_xml) {
                     g_config_info.delmsg_info.arg_msg_index = candidate_indices[c];
                     g_config_info.delmsg_info.offset_revoke_xml = (int)((uint64_t)revoke_xml - candidates[c]);
@@ -512,9 +530,17 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
         }
 
         bool is_self = false;
-        for (int64_t i = 0; i <= (int64_t)revoke_xml->size - (int64_t)sizeof(self_revoke_sig); i++)
+        for (int64_t i = 0; i < (int64_t)revoke_xml->size; i++)
         {
-            if (memcmp((void*)(revoke_xml_str_addr + i), self_revoke_sig, sizeof(self_revoke_sig)) == 0)
+            bool matches_chinese =
+                i <= (int64_t)revoke_xml->size - (int64_t)sizeof(self_revoke_sig) &&
+                memcmp((void*)(revoke_xml_str_addr + i),
+                    self_revoke_sig, sizeof(self_revoke_sig)) == 0;
+            bool matches_english =
+                i <= (int64_t)revoke_xml->size - (int64_t)sizeof(self_revoke_sig_english) &&
+                memcmp((void*)(revoke_xml_str_addr + i),
+                    self_revoke_sig_english, sizeof(self_revoke_sig_english)) == 0;
+            if (matches_chinese || matches_english)
             {
                 is_self = true;
                 break;
@@ -561,7 +587,13 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
             }
 
             uint8_t anchor[] = { 0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1 }; //'一条' utf-8
+			uint8_t anchor_english[] = { 0x61, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65 }; //'a message' ascii
             StdString* revoke_xml = FindStdStringWithSig(arg_msg, 0x1000, anchor, sizeof(anchor));
+            if (revoke_xml == nullptr)
+            {
+                revoke_xml = FindStdStringWithSig(arg_msg, 0x1000,
+                    anchor_english, sizeof(anchor_english));
+            }
             if (revoke_xml == nullptr || revoke_xml->size <= 0)
             {
                 OutputDebugPrintf("[Debug] Add2DB: Cannot find revoke_xml");
@@ -625,13 +657,28 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
         memcpy((void*)mem_srvid_addr, rand_srvid.data(), rand_srvid.size());
 
         uint8_t anchor[] = { 0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1 }; //'一条' utf-8
-        for (int64_t i = 0; i <= (int64_t)revoke_xml->size - (int64_t)sizeof(anchor); i++)
+		uint8_t anchor_english[] = { 0x61, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65 }; //'a message' ascii
+        uint8_t replace[] = { 0xe5, 0xa6, 0x82, 0xe4, 0xb8, 0x8a }; //'如上' utf-8
+		uint8_t replace_english[] = { 0x61, 0x62, 0x6f, 0x76, 0x65, 0x20, 0x6d, 0x73, 0x67 }; //'above msg' ascii
+        for (int64_t i = 0; i < (int64_t)revoke_xml->size; i++)
         {
-            if (memcmp((void*)(revoke_xml_str_addr + i), anchor, sizeof(anchor)) == 0)
+            if (i <= (int64_t)revoke_xml->size - (int64_t)sizeof(anchor) &&
+                memcmp((void*)(revoke_xml_str_addr + i), anchor, sizeof(anchor)) == 0)
             {
-                uint8_t replace[] = { 0xe5, 0xa6, 0x82, 0xe4, 0xb8, 0x8a }; //'如上' utf-8
                 memcpy((void*)(revoke_xml_str_addr + i), replace, sizeof(replace));
                 OutputDebugPrintf("[Debug] Replace Revoke XML Success! | New XML: %s", (char*)revoke_xml_str_addr);
+                break;
+            }
+            if (i <= (int64_t)revoke_xml->size - (int64_t)sizeof(anchor_english) &&
+                memcmp((void*)(revoke_xml_str_addr + i),
+                    anchor_english, sizeof(anchor_english)) == 0)
+            {
+                memcpy((void*)(revoke_xml_str_addr + i),
+                    replace_english, sizeof(replace_english));
+                memset((void*)(revoke_xml_str_addr + i + sizeof(replace_english)), ' ',
+                    sizeof(anchor_english) - sizeof(replace_english));
+                OutputDebugPrintf("[Debug] Replace English Revoke XML Success! | New XML: %s",
+                    (char*)revoke_xml_str_addr);
                 break;
             }
         }
@@ -643,6 +690,35 @@ static void OnTargetHit(PCONTEXT ctx, PEXCEPTION_RECORD /*pExc*/)
     }
 }
 
+void InitLog()
+{
+    if (g_hLogFile != INVALID_HANDLE_VALUE)
+        return;
+
+    char tempPath[MAX_PATH] = { 0 };
+    if (GetTempPathA(MAX_PATH, tempPath) == 0)
+    {
+        OutputDebugStringA("[RevokeHook] GetTempPath For Log Failed!");
+        return;
+    }
+
+    std::string logPath = std::string(tempPath) + "RevokeHook.log";
+
+    g_hLogFile = CreateFileA(
+        logPath.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, // 允许其他程序打开
+        nullptr,
+        CREATE_ALWAYS,                    // 每次打开时清空旧日志
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+
+    if (g_hLogFile == INVALID_HANDLE_VALUE)
+    {
+        OutputDebugStringA("[RevokeHook] CreateFile Log Failed!");
+    }
+}
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
@@ -660,6 +736,8 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         OutputDebugString(TEXT("[RevokeHook] Reading Config..."));
         if (!ReadExternalConfig((char*)lpReserved)) break;   //ini路径通过第三个参数传进来
         OutputDebugString(TEXT("[RevokeHook] Begin Install VEH & Set Bp!"));
+
+        if (g_output_debeug_msg) InitLog(); // 初始化日志文件
 
         if (!VehBp_Init(TRUE))
         {
@@ -688,6 +766,11 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         VehBp_Uninit();
         FreeCurrentThreadState();
         UninitThreadStateTls();
+        if (g_hLogFile != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(g_hLogFile);
+            g_hLogFile = INVALID_HANDLE_VALUE;
+		}
         break;
     }
     return TRUE;

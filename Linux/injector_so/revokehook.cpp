@@ -569,8 +569,19 @@ static void OnTargetHit(ucontext_t *ctx, siginfo_t * /*info*/) {
             return;
         }
 
-        uint8_t revoke_sig[]      = { 0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e };           // '撤回'
-        uint8_t self_revoke_sig[] = { 0xe4, 0xbd, 0xa0, 0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e }; // '你撤回'
+        const uint8_t revoke_sig[] = {
+            0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e
+        }; // '撤回'
+        const uint8_t self_revoke_sig[] = {
+            0xe4, 0xbd, 0xa0, 0xe6, 0x92, 0xa4, 0xe5, 0x9b, 0x9e
+        }; // '你撤回'
+        const uint8_t revoke_sig_english[] = {
+            0x72, 0x65, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x64
+        }; // 'recalled'
+        const uint8_t self_revoke_sig_english[] = {
+            0x59, 0x6f, 0x75, 0x20, 0x72, 0x65, 0x63, 0x61,
+            0x6c, 0x6c, 0x65, 0x64
+        }; // 'You recalled'
 
         ProgramString revoke_xml = {};
         uint64_t revoke_xml_addr = 0;
@@ -595,10 +606,17 @@ static void OnTargetHit(ucontext_t *ctx, siginfo_t * /*info*/) {
             int candidate_indices[] = { 2, 3, 4 };
 
             for (int c = 0; c < 3 && revoke_xml_addr == 0; c++) {
-                if (FindProgramStringWithSig(candidates[c], 0x2000,
-                                             revoke_sig, sizeof(revoke_sig),
-                                             &revoke_xml_addr, &revoke_xml,
-                                             &revoke_xml_layout)) {
+                bool found = FindProgramStringWithSig(
+                    candidates[c], 0x2000,
+                    revoke_sig, sizeof(revoke_sig),
+                    &revoke_xml_addr, &revoke_xml, &revoke_xml_layout);
+                if (!found) {
+                    found = FindProgramStringWithSig(
+                        candidates[c], 0x2000,
+                        revoke_sig_english, sizeof(revoke_sig_english),
+                        &revoke_xml_addr, &revoke_xml, &revoke_xml_layout);
+                }
+                if (found) {
                     g_config_info.delmsg_info.arg_msg_index = candidate_indices[c];
                     g_config_info.delmsg_info.offset_revoke_xml =
                         (int)(revoke_xml_addr - candidates[c]);
@@ -645,9 +663,14 @@ static void OnTargetHit(ucontext_t *ctx, siginfo_t * /*info*/) {
             return;
         }
 
-        bool is_self = FindSignatureInMemory(
-            xml_addr, revoke_xml.size,
-            self_revoke_sig, sizeof(self_revoke_sig)) != 0;
+        bool is_self =
+            FindSignatureInMemory(
+                xml_addr, revoke_xml.size,
+                self_revoke_sig, sizeof(self_revoke_sig)) != 0 ||
+            FindSignatureInMemory(
+                xml_addr, revoke_xml.size,
+                self_revoke_sig_english,
+                sizeof(self_revoke_sig_english)) != 0;
 
         if (is_self && !g_anti_revoke_self_msg) {
             ts->anti_revoke_cur_msg = 0;
@@ -687,14 +710,25 @@ static void OnTargetHit(ucontext_t *ctx, siginfo_t * /*info*/) {
                 return;
             }
 
-            uint8_t anchor[] = { 0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1 }; // '一条'
+            const uint8_t anchor[] = {
+                0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1
+            }; // '一条'
+            const uint8_t anchor_english[] = {
+                0x61, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65
+            }; // 'a message'
             ProgramString rx = {};
             uint64_t rx_addr = 0;
             int rx_layout = PROGRAM_STRING_UNKNOWN;
-            if (!FindProgramStringWithSig(arg_msg, 0x1000,
-                                          anchor, sizeof(anchor),
-                                          &rx_addr, &rx, &rx_layout) ||
-                rx.size == 0) {
+            bool found = FindProgramStringWithSig(
+                arg_msg, 0x1000, anchor, sizeof(anchor),
+                &rx_addr, &rx, &rx_layout);
+            if (!found) {
+                found = FindProgramStringWithSig(
+                    arg_msg, 0x1000,
+                    anchor_english, sizeof(anchor_english),
+                    &rx_addr, &rx, &rx_layout);
+            }
+            if (!found || rx.size == 0) {
                 DebugPrintf("[Debug] Add2DB: Cannot find revoke_xml");
                 return;
             }
@@ -783,15 +817,34 @@ static void OnTargetHit(ucontext_t *ctx, siginfo_t * /*info*/) {
             (void *)mem_srvid_addr,
             rand_srvid[0], rand_srvid[1], rand_srvid[2], rand_srvid[3]);
 
-        // Replace '一条' → '如上'
-        uint8_t anchor[]  = { 0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1 };
-        uint8_t replace[] = { 0xe5, 0xa6, 0x82, 0xe4, 0xb8, 0x8a };
+        // Replace '一条' -> '如上', or 'a message' -> 'above msg'.
+        const uint8_t anchor[] = {
+            0xe4, 0xb8, 0x80, 0xe6, 0x9d, 0xa1
+        };
+        const uint8_t replace[] = {
+            0xe5, 0xa6, 0x82, 0xe4, 0xb8, 0x8a
+        };
+        const uint8_t anchor_english[] = {
+            0x61, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65
+        };
+        const uint8_t replace_english[] = {
+            0x61, 0x62, 0x6f, 0x76, 0x65, 0x20, 0x6d, 0x73, 0x67
+        };
         uint64_t anchor_addr = FindSignatureInMemory(
             xml_addr, revoke_xml.size, anchor, sizeof(anchor));
         if (anchor_addr != 0 &&
             WriteMemory((void *)(uintptr_t)anchor_addr,
                         replace, sizeof(replace))) {
             DebugPrintf("[Debug] Replace Revoke XML Success!");
+        } else {
+            anchor_addr = FindSignatureInMemory(
+                xml_addr, revoke_xml.size,
+                anchor_english, sizeof(anchor_english));
+            if (anchor_addr != 0 &&
+                WriteMemory((void *)(uintptr_t)anchor_addr,
+                            replace_english, sizeof(replace_english))) {
+                DebugPrintf("[Debug] Replace English Revoke XML Success!");
+            }
         }
 
         if (SetArgValue(ctx, arg_bool_index, 1))
